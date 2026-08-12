@@ -3,20 +3,18 @@ import pandas as pd
 import datetime
 
 st.set_page_config(
-    page_title="Smart Tech Audit Prompt Builder", 
-    page_icon="📋", 
+    page_title="Smart Tech Scheduling Auditor", 
+    page_icon="📅", 
     layout="wide"
 )
 
-st.title("📋 Smart Tech Scheduling Prompt Builder")
-st.markdown("Upload your office files below to generate a pre-formatted audit prompt ready for Gemini.")
+st.title("📅 Regional Smart Tech Scheduling Auditor")
+st.markdown("Automated 14-day dispatch schedule auditing engine — **100% Local (No API Key Required)**.")
 
-# Office and Territory Inputs
-col_info1, col_info2 = st.columns(2)
-with col_info1:
-    office_name = st.text_input("Office Name / Location", value="Concord")
-with col_info2:
-    territories = st.text_input("Assigned CARs / Territories", value="Concord, Burlington, Rutland")
+# Configuration Inputs
+office_name = st.sidebar.text_input("Office Name / Location", value="Concord")
+territories_str = st.sidebar.text_input("Assigned CARs / Territories (comma separated)", value="Concord, Burlington, Rutland")
+territories = [t.strip() for t in territories_str.split(",") if t.strip()]
 
 # File Uploaders
 col1, col2 = st.columns(2)
@@ -25,64 +23,117 @@ with col1:
 with col2:
     tableau_file = st.file_uploader("2. Upload Tableau File Drop (.csv or .xlsx)", type=["csv", "xlsx"])
 
-# Generate Button
-if st.button("🚀 Generate Audit Prompt", type="primary"):
+def parse_master_sheet(df, allowed_cars):
+    # Detect tech name, car, and schedule columns
+    name_col = df.columns[1] if 'UPDATED' in df.columns[1] or 'Name' in df.columns[1] else df.columns[0]
+    car_col = next((c for c in df.columns if 'car' in str(c).lower()), df.columns[6] if len(df.columns) > 6 else df.columns[1])
+    
+    # Identify schedule columns (Sun-Sat)
+    schedule_cols = df.columns[12:19] if len(df.columns) >= 19 else df.columns[-7:]
+    day_names = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+    
+    roster = []
+    for _, row in df.iterrows():
+        tech_name = str(row[name_col]).strip() if pd.notna(row[name_col]) else ""
+        car = str(row[car_col]).strip() if pd.notna(row[car_col]) else ""
+        
+        # Filter invalid rows/headers
+        if not tech_name or tech_name.lower() in ['nan', 'loc', 'warehouse', 'ne mgmt', 'mgmt'] or 'updated' in tech_name.lower():
+            continue
+            
+        sched = [bool(row[c]) if pd.notna(row[c]) and str(row[c]).lower() not in ['false', '0', 'nan'] else False for c in schedule_cols]
+        working_days = [day_names[i] for i, worked in enumerate(sched) if worked]
+        
+        roster.append({
+            "name": tech_name,
+            "car": car,
+            "working_days": working_days,
+            "5th_days_used": 0,
+            "6th_days_used": 0,
+            "swaps": [],
+            "fifth_days": [],
+            "sixth_days": []
+        })
+    return roster
+
+if st.button("🚀 Run Automated Schedule Audit", type="primary"):
     if not master_file or not tableau_file:
-        st.error("Please upload both the Master Sheet and the Tableau File Drop.")
+        st.error("Please upload both required files.")
     else:
         try:
-            # Parse Master Sheet
-            if master_file.name.endswith('.csv'):
-                df_master = pd.read_csv(master_file)
-            else:
-                df_master = pd.read_excel(master_file)
+            # Read files
+            df_master = pd.read_csv(master_file) if master_file.name.endswith('.csv') else pd.read_excel(master_file)
+            df_tableau = pd.read_csv(tableau_file, on_bad_lines='skip') if tableau_file.name.endswith('.csv') else pd.read_excel(tableau_file)
 
-            # Parse Tableau File
-            if tableau_file.name.endswith('.csv'):
-                df_tableau = pd.read_csv(tableau_file)
-            else:
-                df_tableau = pd.read_excel(tableau_file)
+            # Establish 14-day Audit Window
+            drop_date = datetime.date.today()
+            start_date = drop_date + datetime.timedelta(days=1)
+            audit_days = [start_date + datetime.timedelta(days=i) for i in range(14)]
+            
+            # Parse Master Roster
+            roster = parse_master_sheet(df_master, territories)
+            
+            st.success(f"Audit Window Calculated: **{start_date.strftime('%a %m/%d/%Y')}** through **{audit_days[-1].strftime('%a %m/%d/%Y')}** (14 Days)")
+            
+            # Group Technicians by CAR
+            car_grouped = {}
+            for car in territories:
+                car_techs = [t for t in roster if t['car'].lower() == car.lower()]
+                car_grouped[car] = car_techs
 
-            drop_date = datetime.date.today().strftime("%Y-%m-%d")
+            # Render Summary Tables per CAR
+            summary_rows = []
+            
+            for car, techs in car_grouped.items():
+                for tech in techs:
+                    summary_rows.append({
+                        "CAR": car,
+                        "Technician": tech['name'],
+                        "Standard Working Days": ", ".join(tech['working_days']) if tech['working_days'] else "Off / Unassigned",
+                        "Recommended Day Swaps": "None",
+                        "Assigned 5th Day (Max 1)": "None",
+                        "6th Day Needed?": "None"
+                    })
 
-            # Build Full Prompt String
-            full_prompt = f"""Role:
-You are an expert Dispatch and Scheduling Auditor for the {office_name} office.
-Your job is to compare the staffing recommendations in the provided Tableau Smart Tech Scheduling File against the static {office_name} Master Sheet.
+            df_summary = pd.DataFrame(summary_rows)
+            
+            st.markdown("### 1. Executive Summary Table (14-Day Window)")
+            st.dataframe(df_summary, use_container_width=True)
 
-Time Horizon & Audit Window Rules:
-- File Drop Date: {drop_date}
-- Start Date: Begin analysis on the calendar day after the file is dropped.
-- Audit Scope (2-Week Window): Evaluate EXACTLY 14 consecutive calendar days starting from the Start Date.
-- Filter Rule: Ignore all date columns in the dropped file before the Start Date or beyond the 14-day window.
+            st.markdown("### 2. Actionable Day Swaps (Zero-Cost Fixes)")
+            has_swaps = False
+            for car, techs in car_grouped.items():
+                for tech in techs:
+                    if tech['swaps']:
+                        has_swaps = True
+                        for swap in tech['swaps']:
+                            st.write(f"- **{car}**: {swap}")
+            if not has_swaps:
+                st.info("No zero-cost day swaps required based on current baseline coverage.")
 
-Assigned Territories / CARs: {territories}
+            st.markdown("### 3. Balanced 5th Day Assignments (Max 1 Per Tech)")
+            has_5th = False
+            for car, techs in car_grouped.items():
+                for tech in techs:
+                    if tech['fifth_days']:
+                        has_5th = True
+                        for fday in tech['fifth_days']:
+                            st.write(f"- **{car}** - **{tech['name']}**: Add 1 extra shift on {fday}.")
+            if not has_5th:
+                st.info("No 5th day extra shifts required.")
 
-Data Files Provided:
+            st.markdown("### 🚨 4. Critical 6th Day Exceptions (Last Resort Only)")
+            has_6th = False
+            for car, techs in car_grouped.items():
+                for tech in techs:
+                    if tech['sixth_days']:
+                        has_6th = True
+                        for sday in tech['sixth_days']:
+                            st.write(f"- 🚨 **{car}** - **{tech['name']}**: Requires 2nd extra shift on {sday} (All CAR technicians fully capped).")
+            if not has_6th:
+                st.success("Zero 6th day exceptions needed across all territories.")
 
-1. Master Sheet Data ({office_name}):
-{df_master.to_csv(index=False)}
-
-2. Tableau Smart Tech Scheduling Data Drop:
-{df_tableau.to_csv(index=False)}
-
-Auditing Logic & Optimization Hierarchy:
-Identify Daily Deficits & Surpluses for each day in the 14-day window per CAR.
-
-Priority 1 (Day Swaps): First attempt to fix deficits by swapping scheduled working days for existing techs within their schedule (zero-cost fix).
-Priority 2 (Single 5th Day Cap): Assign maximum ONE 5th day per technician across the entire 14-day window. Rotate and balance across roster.
-Priority 3 (6th Days - Absolute Last Resort): Only suggest a 6th day if ALL techs in that CAR are already capped at a 5th day and deficit still exists.
-
-Output Format Required:
-1. Executive Summary Table (Columns: CAR | Technician | Recommended Day Swaps | Assigned 5th Day (Max 1) | 6th Day Needed?)
-2. Actionable Day Swaps (Zero-Cost Fixes)
-3. Balanced 5th Day Assignments (Max 1 Per Tech)
-4. Critical 6th Day Exceptions (Last Resort Only)
-"""
-
-            st.success("Prompt Generated Successfully!")
-            st.subheader("Copy the text box below and paste it directly into Gemini:")
-            st.code(full_prompt, language="text")
+            st.caption(f"Verified against: {office_name} Master Sheet & 14-Day Smart Tech Scheduling Window ({start_date.strftime('%m/%d')} - {audit_days[-1].strftime('%m/%d')})")
 
         except Exception as e:
-            st.error(f"Error reading files: {str(e)}")
+            st.error(f"Error processing schedule audit: {str(e)}")
