@@ -1,116 +1,88 @@
 import streamlit as st
 import pandas as pd
 import datetime
-import google.generativeai as genai
 
-# Streamlit Page Setup
 st.set_page_config(
-    page_title="Smart Tech Scheduling Auditor",
-    page_icon="📅",
+    page_title="Smart Tech Audit Prompt Builder", 
+    page_icon="📋", 
     layout="wide"
 )
 
-st.title("📅 Regional Smart Tech Scheduling Auditor")
-st.markdown("Upload your office's Master Sheet and daily Tableau drop file to generate an optimized 14-day scheduling audit.")
+st.title("📋 Smart Tech Scheduling Prompt Builder")
+st.markdown("Upload your office files below to generate a pre-formatted audit prompt ready for Gemini.")
 
-# Sidebar Controls
-st.sidebar.header("⚙️ Settings & Configuration")
+# Office and Territory Inputs
+col_info1, col_info2 = st.columns(2)
+with col_info1:
+    office_name = st.text_input("Office Name / Location", value="Concord")
+with col_info2:
+    territories = st.text_input("Assigned CARs / Territories", value="Concord, Burlington, Rutland")
 
-# API Key handling (either entered in UI or retrieved from Streamlit secrets)
-api_key = st.sidebar.text_input("Enter Gemini API Key", type="password", help="Get a free API key at aistudio.google.com")
-if not api_key and "GEMINI_API_KEY" in st.secrets:
-    api_key = st.secrets["GEMINI_API_KEY"]
-
-office_name = st.sidebar.text_input("Office Name / Location", value="Concord")
-territories = st.sidebar.text_input("Assigned CARs / Territories (comma separated)", value="Concord, Burlington, Rutland")
-
-st.sidebar.markdown("---")
-st.sidebar.info("💡 **Free Deployment Tip:** Store the Gemini API Key in Streamlit Secrets so users don't have to enter it manually.")
-
-# Main Interface File Uploaders
+# File Uploaders
 col1, col2 = st.columns(2)
-
 with col1:
-    st.subheader("1. Office Master Sheet")
-    master_file = st.file_uploader("Upload static roster & baseline schedule (.csv or .xlsx)", type=["csv", "xlsx"], key="master")
-
+    master_file = st.file_uploader("1. Upload Office Master Sheet (.csv or .xlsx)", type=["csv", "xlsx"])
 with col2:
-    st.subheader("2. Tableau File Drop")
-    tableau_file = st.file_uploader("Upload daily Smart Tech Scheduling export (.csv or .xlsx)", type=["csv", "xlsx"], key="tableau")
+    tableau_file = st.file_uploader("2. Upload Tableau File Drop (.csv or .xlsx)", type=["csv", "xlsx"])
 
-# Process Files on Button Click
-if st.button("🚀 Run 14-Day Schedule Audit", type="primary"):
-    if not api_key:
-        st.error("Please enter a valid Gemini API Key in the sidebar.")
-    elif not master_file or not tableau_file:
-        st.error("Please upload both the Office Master Sheet and the Tableau File Drop.")
+# Generate Button
+if st.button("🚀 Generate Audit Prompt", type="primary"):
+    if not master_file or not tableau_file:
+        st.error("Please upload both the Master Sheet and the Tableau File Drop.")
     else:
         try:
-            with st.spinner("Analyzing schedule targets, calculating 14-day audit window, and balancing shifts..."):
-                # Configure Gemini API
-                genai.configure(api_key=api_key)
-                model = genai.GenerativeModel("gemini-1.5-flash")
+            # Parse Master Sheet
+            if master_file.name.endswith('.csv'):
+                df_master = pd.read_csv(master_file)
+            else:
+                df_master = pd.read_excel(master_file)
 
-                # Read data preview for prompt context
-                if master_file.name.endswith('.csv'):
-                    df_master = pd.read_csv(master_file)
-                else:
-                    df_master = pd.read_excel(master_file)
+            # Parse Tableau File
+            if tableau_file.name.endswith('.csv'):
+                df_tableau = pd.read_csv(tableau_file)
+            else:
+                df_tableau = pd.read_excel(tableau_file)
 
-                if tableau_file.name.endswith('.csv'):
-                    df_tableau = pd.read_csv(tableau_file)
-                else:
-                    df_tableau = pd.read_excel(tableau_file)
+            drop_date = datetime.date.today().strftime("%Y-%m-%d")
 
-                drop_date = datetime.date.today().strftime("%Y-%m-%d")
-
-                # Construct Audit Prompt
-                prompt = f"""
+            # Build Full Prompt String
+            full_prompt = f"""Role:
 You are an expert Dispatch and Scheduling Auditor for the {office_name} office.
 Your job is to compare the staffing recommendations in the provided Tableau Smart Tech Scheduling File against the static {office_name} Master Sheet.
 
-Date Context:
+Time Horizon & Audit Window Rules:
 - File Drop Date: {drop_date}
-- Audit Scope: Evaluate EXACTLY 14 consecutive calendar days starting the day AFTER {drop_date}.
-- Ignore all date columns before the Start Date or beyond the 14-day window.
+- Start Date: Begin analysis on the calendar day after the file is dropped.
+- Audit Scope (2-Week Window): Evaluate EXACTLY 14 consecutive calendar days starting from the Start Date.
+- Filter Rule: Ignore all date columns in the dropped file before the Start Date or beyond the 14-day window.
 
 Assigned Territories / CARs: {territories}
 
 Data Files Provided:
+
 1. Master Sheet Data ({office_name}):
-{df_master.to_string()}
+{df_master.to_csv(index=False)}
 
 2. Tableau Smart Tech Scheduling Data Drop:
-{df_tableau.to_string()}
+{df_tableau.to_csv(index=False)}
 
 Auditing Logic & Optimization Hierarchy:
-1. Identify Daily Deficits & Surpluses for each day in the 14-day window per CAR.
-2. Priority 1 (Day Swaps): Swap scheduled working days for existing techs within their schedule (zero extra cost).
-3. Priority 2 (Single 5th Day Cap): Assign maximum ONE 5th day per technician across the entire 14 days. Balance across roster.
-4. Priority 3 (6th Days - Absolute Last Resort): Only flag if all techs in that CAR are already capped at a 5th day.
+Identify Daily Deficits & Surpluses for each day in the 14-day window per CAR.
+
+Priority 1 (Day Swaps): First attempt to fix deficits by swapping scheduled working days for existing techs within their schedule (zero-cost fix).
+Priority 2 (Single 5th Day Cap): Assign maximum ONE 5th day per technician across the entire 14-day window. Rotate and balance across roster.
+Priority 3 (6th Days - Absolute Last Resort): Only suggest a 6th day if ALL techs in that CAR are already capped at a 5th day and deficit still exists.
 
 Output Format Required:
-Return a clean, well-formatted Markdown response containing:
 1. Executive Summary Table (Columns: CAR | Technician | Recommended Day Swaps | Assigned 5th Day (Max 1) | 6th Day Needed?)
 2. Actionable Day Swaps (Zero-Cost Fixes)
-3. Balanced 5th Day Assignments
+3. Balanced 5th Day Assignments (Max 1 Per Tech)
 4. Critical 6th Day Exceptions (Last Resort Only)
 """
 
-                # Query Gemini API
-                response = model.generate_content(prompt)
-
-                st.success("Audit Complete!")
-                st.markdown("---")
-                st.markdown(response.text)
-
-                # Download button for the generated report
-                st.download_button(
-                    label="📥 Download Audit Report (.txt)",
-                    data=response.text,
-                    file_name=f"{office_name}_Schedule_Audit_{drop_date}.txt",
-                    mime="text/plain"
-                )
+            st.success("Prompt Generated Successfully!")
+            st.subheader("Copy the text box below and paste it directly into Gemini:")
+            st.code(full_prompt, language="text")
 
         except Exception as e:
-            st.error(f"An error occurred during processing: {str(e)}")
+            st.error(f"Error reading files: {str(e)}")
